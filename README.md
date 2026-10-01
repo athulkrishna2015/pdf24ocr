@@ -94,9 +94,39 @@ historical variants (`chi_tra_vert`, `frk`, `grc`). Full list is in the
 | `-c, --clean` | remove scanning artefacts |
 | `-j, --join` | merge all inputs into a single PDF (one sequential job) |
 | `-p, --parallel N` | max concurrent jobs, default 4 |
+| `-T, --keep-tree` | keep each result beside its source; with `-O`, mirror the tree under it |
+| `-R, --resume` | skip inputs whose output is already complete |
+| `-n, --dry-run` | print resolved output paths, send nothing, fail on collisions |
 
 `-O` refuses to name a file that is also one of the inputs, so a typo can't
 destroy the document you were OCRing.
+
+### Long batches
+
+Three flags exist because OCR'ing a folder of files is a different job from
+OCR'ing one document, and the failure modes are worse.
+
+`-T --keep-tree` — without it, everything lands flat in `-O`, so two files named
+`Maths.pdf` in different folders silently overwrite each other. With it and no
+`-O`, each result sits beside its source. Your filenames contain spaces,
+parentheses and Malayalam script; that is handled, but only worth relying on
+after checking.
+
+`-R --resume` — a finished output is its own record of completion. Both files
+must exist and the PDF must be a real PDF, so a truncated file from a killed run
+is redone rather than trusted. Re-run the identical command to finish the rest.
+
+`-n --dry-run` — the one to use first. It prints the resolved output path for
+every input, sends nothing, and exits 1 if two inputs would write the same file:
+
+```sh
+# check before committing to a multi-hour run
+mapfile -d '' files < <(find . -iname '*.pdf' -print0)
+pdf24ocr -F -l eng+mal -c -T -R -n -p 4 "${files[@]}"
+```
+
+On a 109-file textbook set this verified all 109 outputs landed beside their
+sources with no collisions, before a single request went out.
 
 ## What the extra flags actually do
 
@@ -126,14 +156,22 @@ the site's own parameter set, so there is nothing to send.
 ## Limits worth knowing
 
 - 100 MB per file, per the dropzone config on the page.
-- OCR is slow and the site says so. A 4-page file took ~20s, 15 pages ~43s;
-  the script polls every 5s and gives up after an hour.
+- OCR is slow and the site says so. A 4-page file took ~20s, 15 pages ~43s,
+  60 sequential one-page files ~71s. The script polls every 5s and gives up
+  after an hour per file.
 - With several inputs and no `-j`, each file gets its own job and its own
   session, capped at `-p` (default 4) and staggered by a second.
 - Uploads are the heavy part. The backend holds the file for about an hour
   afterwards, so a large batch occupies server-side storage that is not yours.
 - A job can complete with zero recognized words and no error. The page was
   processed; Tesseract just found nothing. Re-run if the document is legible.
+- The site caps how many times one document can be OCR'd per day. Hit it and
+  `getStatus` reports something other than `pending`/`done`; the script surfaces
+  the server's message.
+- There is no resume-after-disconnect. A dropped network stops the batch, on
+  purpose: silently reconnecting and re-uploading is not a thing this does to
+  someone else's free service. Re-run the command; `-R` picks up where it
+  stopped. Use `tmux` or `nohup` if the batch must outlive your terminal.
 
 ## Test
 
@@ -150,7 +188,9 @@ Covered: arg validation and exit codes, English/German/Cyrillic OCR, mixed-mode
 page), multi-page files, text layer actually embedded in the output, deskew on
 vs off, inverted scans, PDF vs PDF/A, `--force` on pages that already have text,
 multi-file fan-out (one job per file), `-p` concurrency cap, `--join`, image
-input, env var defaults, unicode filenames.
+input, env var defaults, unicode filenames, `--dry-run` (sends nothing, catches
+a flat-directory collision), `--keep-tree` with same-named files, and `--resume`
+skipping a complete output while redoing a truncated one.
 
 Each fixture is rasterized, and `mk` aborts the run if any of them already has a
 text layer — otherwise "OCR worked" would pass without any OCR happening.
@@ -190,17 +230,10 @@ The endpoint list and payload shape came from `/static/js/common.js` on the
 tool page. Same API works for the other tools there: `mergePdf`, `convertToPdf`,
 `compressPdf`, and friends.
 
-## Limits worth knowing
-
-- 100 MB per file, per the dropzone config on the page.
-- OCR is slow and the site says so. A 4-page file took ~20s, 15 pages ~43s,
-  60 sequential one-page files ~71s. The script polls every 5s and gives up
-  after an hour per file.
-- The site caps how many times one document can be OCR'd per day. Hit it and
-  `getStatus` reports something other than `pending`/`done`; the script surfaces
-  the server's message.
-- A job can complete with zero recognized words and no error. The page was
-  processed; Tesseract just found nothing. Re-run if the document is legible.
+For reference, the site's own client ships `parallelUploads: 3` and one session
+per page load. Its worker list is 50 hosts (`filetools0`…`filetools49`), all
+equal weight, picked at random per session — that is capacity, not permission to
+open one session per file at once.
 
 ## Notes
 

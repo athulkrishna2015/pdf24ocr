@@ -18,6 +18,14 @@ Usage: pdf24ocr [options] FILE...
   -c, --clean        remove scanning artefacts
   -j, --join         merge all inputs into one PDF (one job, sequential)
   -p, --parallel N   max jobs at once (default 4)
+  -T, --keep-tree    mirror the input folder layout, so same-named files in
+                     different subjects do not overwrite each other. With -O, that
+                     becomes the output root; without it, output sits beside each
+                     source file.
+  -R, --resume       skip inputs whose output already exists and is a complete
+                     PDF, so an interrupted batch can be re-run to finish the rest
+  -n, --dry-run      print the resolved output path for every input and send
+                     nothing. Fails if two inputs would write the same output.
   -O, --out FILE     where to save the PDF; a directory when given several files
       --text FILE    where to save recognized text (single file only)
 
@@ -41,7 +49,13 @@ rotate=false
 clean=false
 textout=
 dest=
+tree=false
+resume=false
+dry=false
+root= # --keep-tree: the directory the input paths are relative to
 ext= # set from -o below; the fan-out branch may have set it already
+skipped=0
+planned= # output paths seen in a dry run, to catch collisions
 par=${PDF24_OCR_PARALLEL:-4}
 parpause=${PDF24_OCR_PAUSE:-1}
 files=()
@@ -59,6 +73,9 @@ while (($#)); do
 		--text) textout=$2; shift 2 ;;
 		-O | --out) dest=$2; shift 2 ;;
 		-p | --parallel) par=$2; shift 2 ;;
+		-T | --keep-tree) tree=true; shift ;;
+		-R | --resume) resume=true; shift ;;
+		-n | --dry-run) dry=true; shift ;;
 		-h | --help) usage; exit 0 ;;
 		-*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
 		*) files+=("$1"); shift ;;
@@ -86,9 +103,20 @@ if ((${#files[@]} > 1)) && ! $join; then
 		echo "--text takes one file; use -O DIR with several" >&2
 		exit 2
 	}
-	dir=${dest:-.}
-	mkdir -p "$dir"
 	ext=$([ "$out" = pdfa ] && echo pdfa || echo pdf)
+	dir=${dest:-.}
+	# --keep-tree keeps each output beside its source, so same-named files in
+	# different subjects never collide. With -O, mirror the tree under that root.
+	if $tree && [[ -n $dest ]]; then
+		# strip the longest shared directory prefix so paths stay relative
+		root=$(
+			cd -- "$(dirname -- "${files[0]}")" 2>/dev/null || dirname -- "${files[0]}"
+			for f in "${files[@]}"; do dirname -- "$f"; done |
+				awk -F/ '{n=NF; for(i=1;i<=n;i++) if($i==p[i] || p[i]=="") p[i]=$i; else {for(j=i;j<=n;j++) p[j]=""} }
+				     END{out=""; for(i=1;i<=NF+1 && p[i]!="";i++) out=out (out==""?"":"/") p[i]; print out}'
+		)
+		[[ -z $root ]] && root=/
+	fi
 	args=(-l "$lang" -o "$out")
 	$force && args+=(-F)
 	$deskew || args+=(-d)
@@ -101,12 +129,94 @@ if ((${#files[@]} > 1)) && ! $join; then
 	for f in "${files[@]}"; do
 		while (($(jobs -rp | wc -l) >= par)); do sleep 1; done
 		base=${f##*/}
-		"$0" "${args[@]}" -O "$dir/${base%.*}_ocr.$ext" --text "$dir/${base%.*}_ocr.txt" "${f}" &
+		if $tree && [[ -z $dest ]]; then
+			# beside the source: keep the input's own directory
+			target=${f%.*}_ocr
+		elif $tree; then
+			rel=${f#"$root"/}
+			[[ $rel == "$f" ]] && rel=$base # input not under root, use basename
+			sub=${rel%/*}
+			[[ $sub == "$rel" ]] && sub=
+			sub=$dest${sub:+/$sub}
+			mkdir -p "$sub"
+			target=$sub/${base%.*}_ocr
+		else
+			mkdir -p "$dir"
+			target=$dir/${base%.*}_ocr
+		fi
+		# --resume: a finished output is its own record. Both files must be there
+		# and the PDF must be a real PDF, so a truncated file from a killed run
+		# gets redone rather than trusted.
+		verb=ocr
+		if $resume || $dry; then
+			if [[ -s $target.$ext && -s $target.txt ]] &&
+				head -c 5 "$target.$ext" 2>/dev/null | grep -q '%PDF-'; then
+				verb=skip
+				skipped=$((skipped + 1))
+			else
+				verb=redo
+			fi
+		fi
+		if $dry; then
+			# show the resolved paths, because a wrong -O or --keep-tree is the
+			# failure that silently scatters output across the filesystem
+			printf '%-5s %s\n     -> %s\n     -> %s\n' "$verb" "$f" \
+				"$target.$ext" "$target.txt"
+			planned="$planned$target.$ext"$'\n'
+			continue
+		fi
+		$resume && [[ $verb == skip ]] && {
+			echo "skip  $f (already done)" >&2
+			continue
+		}
+		$resume && echo "redo  $f" >&2
+		"$0" "${args[@]}" -O "$target.$ext" --text "$target.txt" "${f}" &
 		sleep "$parpause" # stagger starts; a burst of N uploads looks automated
 	done
+	if $dry; then
+		# a dry run that would write two outputs to the same path is a real bug
+		dupes=$(sort <<<"$planned" | uniq -d)
+		if [[ -n $dupes ]]; then
+			echo "COLLISION: these outputs are written more than once:" >&2
+			sed 's/^/  /' <<<"$dupes" >&2
+			exit 1
+		fi
+		printf 'dry run: %d files, %d would be skipped, %d would be OCRed\n' \
+			"${#files[@]}" "$skipped" "$((${#files[@]} - skipped))" >&2
+		printf 'no requests sent. drop -n to run.\n' >&2
+		exit 0
+	fi
+	if $resume; then
+		echo "resume: $skipped of ${#files[@]} already done" >&2
+	fi
 	rc=0
 	wait || rc=1 # wait returns nonzero if any child failed
 	exit $rc
+fi
+
+[[ $out = pdfa ]] && ext=pdfa
+ext=${ext:-pdf}
+dest=${dest:-${files[0]%.*}_ocr.$ext}
+textout=${textout:-${files[0]%.*}_ocr.txt}
+
+if $dry; then
+	verb=ocr
+	$resume && {
+		if [[ -s $dest && -s $textout ]] && head -c 5 "$dest" | grep -q '%PDF-'; then
+			verb=skip
+		else
+			verb=redo
+		fi
+	}
+	printf '%-5s %s\n     -> %s\n     -> %s\n' "$verb" "${files[0]}" "$dest" "$textout"
+	echo "dry run: 1 file, nothing sent. drop -n to run." >&2
+	exit 0
+fi
+
+# --resume on a single file: a complete output pair means there is nothing to do
+if $resume && [[ -s $dest && -s $textout ]] && head -c 5 "$dest" | grep -q '%PDF-'; then
+	echo "$dest" "$textout"
+	exit 0
 fi
 
 jar=$(mktemp)

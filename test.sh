@@ -208,6 +208,49 @@ code 0 "-p 1 serialises four inputs" -p 1 -O "$tmp/serial" "$tmp/multi1.pdf" "$t
 code 2 "--text refused with several files" --text "$tmp/nope.txt" "$tmp/multi1.pdf" "$tmp/multi2.pdf"
 [[ $(ls "$tmp/serial"/*.pdf 2>/dev/null | wc -l) == 4 ]] &&
 	ok "-p 1 still writes every result" || no "-p 1 still writes every result"
+
+echo
+echo "dry run, keep-tree, resume"
+# -n must not send anything or write anything
+cp "$tmp/eng.pdf" "$tmp/dry1.pdf"
+cp "$tmp/eng.pdf" "$tmp/dry2.pdf"
+before=$(find "$tmp" -name '*.pdf' | wc -l)
+$SCRIPT -n "$tmp/dry1.pdf" "$tmp/dry2.pdf" >"$tmp/dry.log" 2>&1
+[[ $? == 0 ]] && ok "--dry-run exits 0" || no "--dry-run exits 0"
+grep -q 'no requests sent' "$tmp/dry.log" && ok "--dry-run says it sent nothing" || no "--dry-run says it sent nothing"
+[[ $(find "$tmp" -name '*.pdf' | wc -l) == $before ]] &&
+	ok "--dry-run wrote nothing" || no "--dry-run wrote nothing"
+grep -q "dry1_ocr.pdf" "$tmp/dry.log" && ok "--dry-run shows resolved paths" || no "--dry-run shows resolved paths"
+# same basename into one flat dir must be caught before it overwrites
+mkdir -p "$tmp/ct/x" "$tmp/ct/y"
+cp "$tmp/eng.pdf" "$tmp/ct/x/same.pdf"
+cp "$tmp/eng.pdf" "$tmp/ct/y/same.pdf"
+$SCRIPT -n -O "$tmp/ct/out" "$tmp/ct/x/same.pdf" "$tmp/ct/y/same.pdf" >"$tmp/coll.log" 2>&1
+[[ $? == 1 ]] && grep -q COLLISION "$tmp/coll.log" && ok "--dry-run catches a flat-dir collision" ||
+	no "--dry-run catches a flat-dir collision"
+# -T keeps same-named files apart and puts each result beside its source
+mkdir -p "$tmp/tt/Maths" "$tmp/tt/ICT"
+cp "$tmp/eng.pdf" "$tmp/tt/Maths/same.pdf"
+cp "$tmp/eng.pdf" "$tmp/tt/ICT/same.pdf"
+$SCRIPT -T "$tmp/tt/Maths/same.pdf" "$tmp/tt/ICT/same.pdf" >/dev/null 2>&1
+[[ -f "$tmp/tt/Maths/same_ocr.pdf" && -f "$tmp/tt/ICT/same_ocr.pdf" ]] &&
+	ok "--keep-tree separates same-named files" || no "--keep-tree separates same-named files"
+# -R must skip finished work and redo damaged work. Output is named
+# <input>_ocr.*, so a source called keepme.pdf yields keepme_ocr.pdf.
+cp "$tmp/tt/Maths/same_ocr.pdf" "$tmp/tt/keepme_ocr.pdf"
+cp "$tmp/tt/Maths/same_ocr.txt" "$tmp/tt/keepme_ocr.txt"
+cp "$tmp/tt/keepme_ocr.pdf" "$tmp/tt/broken_ocr.pdf"
+cp "$tmp/tt/keepme_ocr.txt" "$tmp/tt/broken_ocr.txt"
+printf 'truncated' >"$tmp/tt/broken_ocr.pdf"
+# and the sources the tool will look for
+: >"$tmp/tt/keepme.pdf"
+: >"$tmp/tt/broken.pdf"
+# -T so the outputs are looked for beside the sources, not in the cwd
+$SCRIPT -n -R -T "$tmp/tt/keepme.pdf" "$tmp/tt/broken.pdf" >"$tmp/res.log" 2>&1
+grep -q '^skip .*keepme' "$tmp/res.log" && ok "--resume skips a complete output" ||
+	no "--resume skips a complete output (log: $(tr '\n' '|' < "$tmp/res.log"))"
+grep -q '^redo .*broken' "$tmp/res.log" && ok "--resume redoes a truncated output" ||
+	no "--resume redoes a truncated output (log: $(tr '\n' '|' < "$tmp/res.log"))"
 ocr "$tmp/j" -j "$tmp/multi1.pdf" "$tmp/multi2.pdf"
 [[ $(grep -c '@@@ Page' "$tmp/j.txt") == 2 ]] && ok "--join merges into one pdf" || no "--join merges into one pdf"
 
