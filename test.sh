@@ -188,16 +188,22 @@ check "--force OCRs existing text layer" "Native Text Layer" "$tmp/fi.txt"
 echo
 echo "multiple inputs"
 mkdir -p "$tmp/multi_out"
-# -O is a directory here: the zip path unpacks per-file results into it
-$SCRIPT -O "$tmp/multi_out" "$tmp/multi1.pdf" "$tmp/multi2.pdf" >"$tmp/zip.log" 2>&1 ||
+# several files fan out into one job each; -O is the output directory
+$SCRIPT -O "$tmp/multi_out" "$tmp/multi1.pdf" "$tmp/multi2.pdf" >"$tmp/multi.log" 2>&1 ||
 	no "two inputs -> exit 0"
 if [[ $(ls "$tmp/multi_out"/*.pdf 2>/dev/null | wc -l) == 2 ]]; then
 	ok "two inputs -> two pdfs"
 else
 	no "two inputs -> two pdfs (got: $(ls "$tmp/multi_out" 2>/dev/null | tr '\n' ' '))"
 fi
+[[ $(ls "$tmp/multi_out"/*.txt 2>/dev/null | wc -l) == 2 ]] &&
+	ok "two inputs -> two text sidecars" || no "two inputs -> two text sidecars"
 check "first input has text" "Quarterly Report" "$tmp/multi_out/multi1_ocr.txt"
 check "second input has text" "Total assets" "$tmp/multi_out/multi2_ocr.txt"
+# one job per file means concurrent workers; the fan-out must not share a session
+[[ $(grep -c 'job ocrPdf_' "$tmp/multi.log") == 2 ]] &&
+	ok "one job per input" || no "one job per input (log: $(tr '\n' ' ' < "$tmp/multi.log"))"
+code 2 "--text refused with several files" --text "$tmp/nope.txt" "$tmp/multi1.pdf" "$tmp/multi2.pdf"
 ocr "$tmp/j" -j "$tmp/multi1.pdf" "$tmp/multi2.pdf"
 [[ $(grep -c '@@@ Page' "$tmp/j.txt") == 2 ]] && ok "--join merges into one pdf" || no "--join merges into one pdf"
 
