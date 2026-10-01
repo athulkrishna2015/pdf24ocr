@@ -21,8 +21,8 @@ It is someone else's free web tool being driven over its own undocumented
 ### Parallel OCR
 
 Several inputs are OCR'd concurrently, one job per file, each on its own
-session. This is not a nicety — the server works the files inside a single job
-one after another, so splitting them is much faster:
+session. The server works the files inside a single job one after another, so
+splitting them is where the speedup comes from:
 
 | 4 one-page PDFs | time |
 | --- | --- |
@@ -30,10 +30,37 @@ one after another, so splitting them is much faster:
 | one job per file | 16s |
 
 Same recognized text either way (verified byte-for-byte). `-O` is the output
-directory in this mode, and `--text` only applies to a single input.
+directory in this mode, and `--text` only applies to a single input. `-j` is the
+exception: merging has to happen server-side, so it stays one sequential job.
 
-`-j` is the exception: merging has to happen server-side, so it stays one
-sequential job.
+```sh
+./pdf24ocr -p 2 -O out/ *.pdf     # gentler
+./pdf24ocr -p 8 -O out/ *.pdf     # push harder, if you must
+```
+
+### Please be a decent client
+
+This drives a small German company's free, ad-funded tool, and they did not
+build it to be scripted. Some things this project does not do, deliberately:
+
+- **No cap evading.** There is no proxy rotation, no IP spreading, no attempt to
+  work around rate limits. If you get throttled, the right answer is to wait.
+- **Default is 4 jobs, staggered by 1s.** Not "one job per core", not 60 at
+  once. Real browsing never looks like that, and the site's own UX is one
+  document at a time.
+- **No CAPTCHA solving, no session forgery beyond the normal cookie.** The
+  session is the same one the browser gets.
+- **Nothing retries indefinitely.** A throttled or failed job is reported to you
+  so you can decide, not silently hammered until it works.
+
+`test.sh` deliberately runs **sequentially**. It is a correctness suite, not a
+benchmark, and there is no reason for it to burst. The one parallel case in it
+uses two files.
+
+The site documents a per-document daily limit and deletes files after an hour.
+Respecting those is on you. If you need bulk OCR at scale, that is a real
+product decision — say so in an issue and the honest answer is to use a
+self-hosted Tesseract, not to load this harder.
 
 ### Mixed-mode OCR
 
@@ -66,6 +93,7 @@ historical variants (`chi_tra_vert`, `frk`, `grc`). Full list is in the
 | `-r, --rotate` | guess and fix page orientation |
 | `-c, --clean` | remove scanning artefacts |
 | `-j, --join` | merge all inputs into a single PDF (one sequential job) |
+| `-p, --parallel N` | max concurrent jobs, default 4 |
 
 `-O` refuses to name a file that is also one of the inputs, so a typo can't
 destroy the document you were OCRing.
@@ -101,8 +129,9 @@ the site's own parameter set, so there is nothing to send.
 - OCR is slow and the site says so. A 4-page file took ~20s, 15 pages ~43s;
   the script polls every 5s and gives up after an hour.
 - With several inputs and no `-j`, each file gets its own job and its own
-  session, run concurrently. There is no concurrency limit in the script, so a
-  few dozen inputs means a few dozen simultaneous uploads.
+  session, capped at `-p` (default 4) and staggered by a second.
+- Uploads are the heavy part. The backend holds the file for about an hour
+  afterwards, so a large batch occupies server-side storage that is not yours.
 - A job can complete with zero recognized words and no error. The page was
   processed; Tesseract just found nothing. Re-run if the document is legible.
 
@@ -120,8 +149,8 @@ Covered: arg validation and exit codes, English/German/Cyrillic OCR, mixed-mode
 `rus+eng` (including a negative control proving `eng` alone fails on the same
 page), multi-page files, text layer actually embedded in the output, deskew on
 vs off, inverted scans, PDF vs PDF/A, `--force` on pages that already have text,
-multi-file fan-out (one job per file), `--join`, image input, env var defaults,
-unicode filenames.
+multi-file fan-out (one job per file), `-p` concurrency cap, `--join`, image
+input, env var defaults, unicode filenames.
 
 Each fixture is rasterized, and `mk` aborts the run if any of them already has a
 text layer — otherwise "OCR worked" would pass without any OCR happening.
@@ -161,7 +190,20 @@ The endpoint list and payload shape came from `/static/js/common.js` on the
 tool page. Same API works for the other tools there: `mergePdf`, `convertToPdf`,
 `compressPdf`, and friends.
 
+## Limits worth knowing
+
+- 100 MB per file, per the dropzone config on the page.
+- OCR is slow and the site says so. A 4-page file took ~20s, 15 pages ~43s,
+  60 sequential one-page files ~71s. The script polls every 5s and gives up
+  after an hour per file.
+- The site caps how many times one document can be OCR'd per day. Hit it and
+  `getStatus` reports something other than `pending`/`done`; the script surfaces
+  the server's message.
+- A job can complete with zero recognized words and no error. The page was
+  processed; Tesseract just found nothing. Re-run if the document is legible.
+
 ## Notes
 
-Not affiliated with PDF24. Their terms cover the site, not this script — if you
-publish this, say so plainly.
+Not affiliated with PDF24. Their terms cover the site, not this script, and
+their terms almost certainly do not grant the right to script their service at
+volume. If you publish this, say so plainly.

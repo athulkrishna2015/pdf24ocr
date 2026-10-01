@@ -17,11 +17,13 @@ Usage: pdf24ocr [options] FILE...
   -r, --rotate       guess and fix page orientation
   -c, --clean        remove scanning artefacts
   -j, --join         merge all inputs into one PDF (one job, sequential)
+  -p, --parallel N   max jobs at once (default 4)
   -O, --out FILE     where to save the PDF; a directory when given several files
       --text FILE    where to save recognized text (single file only)
 
-Several files are OCR'd concurrently, one job each. --text only applies to a
-single input; pass -O DIR to collect several results.
+Several files are OCR'd concurrently, one job each, capped at -p and staggered
+by 1s. PDF24 is a free, ad-funded service: keep the default unless you have a
+reason, and prefer fewer jobs over more. -j needs the single-job path to merge.
 
 -d is the only preprocessing flag with a clearly measurable effect; -b/-r/-c
 are sent and logged server-side but were hard to see a difference from.
@@ -40,6 +42,8 @@ clean=false
 textout=
 dest=
 ext= # set from -o below; the fan-out branch may have set it already
+par=${PDF24_OCR_PARALLEL:-4}
+parpause=${PDF24_OCR_PAUSE:-1}
 files=()
 
 while (($#)); do
@@ -54,6 +58,7 @@ while (($#)); do
 		-j | --join) join=true; shift ;;
 		--text) textout=$2; shift 2 ;;
 		-O | --out) dest=$2; shift 2 ;;
+		-p | --parallel) par=$2; shift 2 ;;
 		-h | --help) usage; exit 0 ;;
 		-*) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
 		*) files+=("$1"); shift ;;
@@ -90,10 +95,14 @@ if ((${#files[@]} > 1)) && ! $join; then
 	$bgremove && args+=(-b)
 	$rotate && args+=(-r)
 	$clean && args+=(-c)
-	# re-invoke ourselves per file: one session and one job each
+	# re-invoke ourselves per file: one session and one job each, at most
+	# $par at a time. This is someone else's free service, so stay a polite
+	# client: a handful of parallel jobs, not a flood.
 	for f in "${files[@]}"; do
+		while (($(jobs -rp | wc -l) >= par)); do sleep 1; done
 		base=${f##*/}
 		"$0" "${args[@]}" -O "$dir/${base%.*}_ocr.$ext" --text "$dir/${base%.*}_ocr.txt" "${f}" &
+		sleep "$parpause" # stagger starts; a burst of N uploads looks automated
 	done
 	rc=0
 	wait || rc=1 # wait returns nonzero if any child failed

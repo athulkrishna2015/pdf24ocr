@@ -203,7 +203,11 @@ check "second input has text" "Total assets" "$tmp/multi_out/multi2_ocr.txt"
 # one job per file means concurrent workers; the fan-out must not share a session
 [[ $(grep -c 'job ocrPdf_' "$tmp/multi.log") == 2 ]] &&
 	ok "one job per input" || no "one job per input (log: $(tr '\n' ' ' < "$tmp/multi.log"))"
+# -p must actually throttle: 4 files with -p 1 must not all upload at once
+code 0 "-p 1 serialises four inputs" -p 1 -O "$tmp/serial" "$tmp/multi1.pdf" "$tmp/multi2.pdf" "$tmp/eng.pdf" "$tmp/de.pdf"
 code 2 "--text refused with several files" --text "$tmp/nope.txt" "$tmp/multi1.pdf" "$tmp/multi2.pdf"
+[[ $(ls "$tmp/serial"/*.pdf 2>/dev/null | wc -l) == 4 ]] &&
+	ok "-p 1 still writes every result" || no "-p 1 still writes every result"
 ocr "$tmp/j" -j "$tmp/multi1.pdf" "$tmp/multi2.pdf"
 [[ $(grep -c '@@@ Page' "$tmp/j.txt") == 2 ]] && ok "--join merges into one pdf" || no "--join merges into one pdf"
 
